@@ -143,7 +143,7 @@ def _load_customer_config(path_override: Optional[str] = None) -> dict:
         return {}
 
     try:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as exc:
         log.warning(

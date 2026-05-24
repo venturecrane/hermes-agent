@@ -305,7 +305,7 @@ def test_re_registration_rebuilds_map(tmp_path):
 
     # Re-register with a different customer.yaml. The map rebuilds.
     yaml_path_2 = str(tmp_path / "v2.yaml")
-    with open(yaml_path_2, "w") as f:
+    with open(yaml_path_2, "w", encoding="utf-8") as f:
         f.write(textwrap.dedent("""\
         connectors:
           Calendar:
