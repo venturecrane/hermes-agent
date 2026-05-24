@@ -1,3 +1,13 @@
+<!--
+  SMD vendored fork of NousResearch/hermes-agent.
+  - Strategy: thin vendored fork plus upstream contribution per
+    venturecrane/ss-console ADR 0015
+    (https://github.com/venturecrane/ss-console/blob/main/docs/adr/0015-hermes-fork-vs-upstream.md).
+  - SMD-specific code lives under `smd/`; see `smd/README.md`.
+  - Fork-tag scheme: `v{upstream}-smd.{n}` (see `smd/README.md`).
+  - Upstream README and docs below this banner are unmodified.
+-->
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
