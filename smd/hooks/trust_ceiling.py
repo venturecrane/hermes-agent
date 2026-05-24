@@ -205,6 +205,41 @@ def _on_pre_tool_call(
     return None
 
 
+def _install_upstream_hook(manager: Any, hook_name: str, callback: Any) -> bool:
+    """Install a callback against the Hermes upstream ``PluginManager``.
+
+    Same shape as the helpers in ``smd.hooks.audit_emission`` and
+    ``smd.hooks.sticky_stop``: the public ``register_hook`` method on
+    ``hermes_cli.plugins`` is defined on ``PluginContext`` (the facade
+    passed to plugin ``register(ctx)`` functions), not on
+    ``PluginManager`` itself. Overlay code does not go through plugin
+    discovery and has no ``PluginContext``, so it cannot use the
+    public method. The fallback touches ``manager._hooks`` directly —
+    exactly what ``PluginContext.register_hook`` does internally
+    (upstream ``hermes_cli/plugins.py``).
+    """
+    public_register = getattr(manager, "register_hook", None)
+    if callable(public_register):
+        try:
+            public_register(hook_name, callback)
+            return True
+        except Exception as exc:
+            log.warning(
+                "register_hook(%r) raised on %s; falling back to "
+                "_hooks dict: %s",
+                hook_name,
+                type(manager).__name__,
+                exc,
+            )
+
+    hooks = getattr(manager, "_hooks", None)
+    if isinstance(hooks, dict):
+        hooks.setdefault(hook_name, []).append(callback)
+        return True
+
+    return False
+
+
 def register_smd_adapter(
     registry: Any,
     *,
@@ -247,7 +282,15 @@ def register_smd_adapter(
         )
         return
 
-    get_plugin_manager().register_hook("pre_tool_call", _on_pre_tool_call)
+    if not _install_upstream_hook(
+        get_plugin_manager(), "pre_tool_call", _on_pre_tool_call
+    ):
+        log.warning(
+            "trust_ceiling: could not install pre_tool_call bridge "
+            "(no compatible PluginManager surface)"
+        )
+        return
+
     _HOOK_REGISTERED = True
     log.info(
         "trust_ceiling: registered pre_tool_call bridge for customer_id=%s",

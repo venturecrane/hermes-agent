@@ -178,6 +178,48 @@ def _on_post_tool_call(
         )
 
 
+def _install_upstream_hook(manager: Any, hook_name: str, callback: Any) -> bool:
+    """Install a callback against the Hermes upstream ``PluginManager``.
+
+    The public ``register_hook`` method on ``hermes_cli.plugins`` is
+    defined on ``PluginContext`` (the facade passed to plugin
+    ``register(ctx)`` functions), not on ``PluginManager`` itself.
+    Overlay code does not go through the plugin discovery path and
+    has no ``PluginContext``, so it cannot use that public method.
+
+    ``PluginContext.register_hook`` internally does
+    ``self._manager._hooks.setdefault(name, []).append(callback)`` (see
+    upstream ``hermes_cli/plugins.py``). This helper does the same.
+
+    The try-then-fallback shape protects against a future upstream
+    change that promotes ``register_hook`` to ``PluginManager``: if it
+    exists we use it; otherwise we touch the underlying dict.
+
+    Returns ``True`` on success, ``False`` if neither path worked
+    (logged by the caller).
+    """
+    public_register = getattr(manager, "register_hook", None)
+    if callable(public_register):
+        try:
+            public_register(hook_name, callback)
+            return True
+        except Exception as exc:
+            log.warning(
+                "register_hook(%r) raised on %s; falling back to "
+                "_hooks dict: %s",
+                hook_name,
+                type(manager).__name__,
+                exc,
+            )
+
+    hooks = getattr(manager, "_hooks", None)
+    if isinstance(hooks, dict):
+        hooks.setdefault(hook_name, []).append(callback)
+        return True
+
+    return False
+
+
 def register_smd_adapter(
     registry: Any,
     *,
@@ -217,7 +259,15 @@ def register_smd_adapter(
         )
         return
 
-    get_plugin_manager().register_hook("post_tool_call", _on_post_tool_call)
+    if not _install_upstream_hook(
+        get_plugin_manager(), "post_tool_call", _on_post_tool_call
+    ):
+        log.warning(
+            "audit_emission: could not install post_tool_call bridge "
+            "(no compatible PluginManager surface)"
+        )
+        return
+
     _HOOK_REGISTERED = True
     log.info(
         "audit_emission: registered post_tool_call bridge for customer_id=%s",

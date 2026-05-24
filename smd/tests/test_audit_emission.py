@@ -80,18 +80,45 @@ def _install_fake_adapter_module() -> None:
 
 
 def _install_fake_plugin_manager() -> dict:
-    """Install a minimal ``hermes_cli.plugins`` module that records
-    ``register_hook`` calls so the test can drive the registered
-    callback directly."""
+    """Install a minimal ``hermes_cli.plugins`` module that mirrors the
+    real upstream surface so the test would catch the integration gap
+    found in PRs #2/#3/#4. The real ``PluginManager`` exposes
+    ``_hooks: dict[str, list[Callable]]`` (populated by
+    ``PluginContext.register_hook`` internally); it does NOT have a
+    public ``register_hook`` method of its own.
+
+    ``state["manager"]`` is the fake manager (with ``_hooks`` dict).
+    ``state["registered"]`` is a property-like view that flattens the
+    current ``_hooks`` into a list of ``(hook_name, callback)`` tuples
+    on each access, so test code stays the same shape it had before.
+    """
     fake_pkg = types.ModuleType("hermes_cli")
     fake_mod = types.ModuleType("hermes_cli.plugins")
-    state: dict = {"registered": []}
 
     class _FakeManager:
-        def register_hook(self, hook_name: str, callback: Any) -> None:
-            state["registered"].append((hook_name, callback))
+        # Mirrors the real PluginManager: a dict only; populated via
+        # direct ``_hooks.setdefault(name, []).append(cb)`` (exactly
+        # what PluginContext.register_hook does internally upstream).
+        def __init__(self) -> None:
+            self._hooks: dict[str, list[Any]] = {}
 
-    fake_mod.get_plugin_manager = lambda: _FakeManager()  # type: ignore[attr-defined]
+    manager = _FakeManager()
+
+    class _RegisteredView:
+        def __iter__(self):
+            for name, cbs in manager._hooks.items():
+                for cb in cbs:
+                    yield (name, cb)
+
+        def __len__(self):
+            return sum(len(v) for v in manager._hooks.values())
+
+        def __getitem__(self, idx):
+            return list(self)[idx]
+
+    state: dict = {"manager": manager, "registered": _RegisteredView()}
+
+    fake_mod.get_plugin_manager = lambda: manager  # type: ignore[attr-defined]
     sys.modules.setdefault("hermes_cli", fake_pkg)
     sys.modules["hermes_cli.plugins"] = fake_mod
     return state
@@ -198,6 +225,32 @@ def test_post_tool_call_swallows_registry_errors(_reset_module_state):
         tool_call_id="",
         duration_ms=0,
     )
+
+
+def test_bridge_installs_on_real_plugin_manager_surface(_reset_module_state):
+    """Regression guard for the integration gap fixed by this PR.
+
+    The real upstream ``PluginManager`` exposes ``_hooks`` only; the
+    public ``register_hook`` method lives on ``PluginContext``. Earlier
+    versions of this bridge called ``manager.register_hook(...)``,
+    which raised ``AttributeError`` at production boot and was masked
+    in tests by fakes that exposed the wrong surface.
+
+    This test asserts the bridge installs against a manager that ONLY
+    has ``_hooks`` (no ``register_hook``), so a regression to the
+    previous shape would fail here."""
+    from smd.hooks import audit_emission
+
+    manager = _reset_module_state["manager"]
+    assert not hasattr(manager, "register_hook"), (
+        "fake manager must mirror the real upstream surface "
+        "(no register_hook method) for this regression guard to hold"
+    )
+
+    registry = _FakeRegistry()
+    audit_emission.register_smd_adapter(registry, customer_id="acme")
+    assert "post_tool_call" in manager._hooks
+    assert len(manager._hooks["post_tool_call"]) == 1
 
 
 def test_register_succeeds_without_adapter_module(monkeypatch):
