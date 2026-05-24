@@ -26,10 +26,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install pytest
+      - name: Install pytest + plugins
+        # pytest-timeout is in upstream's pyproject.toml [tool.pytest.ini_options]
+        # addopts (--timeout=30 --timeout-method=signal); without it, pytest
+        # rejects the unknown args before it ever collects smd/tests.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install pytest pytest-timeout
 
       - name: Run smd/tests
         # pytest exit code 5 == "no tests collected", which is the
