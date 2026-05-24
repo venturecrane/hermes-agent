@@ -88,15 +88,37 @@ def _install_fake_adapter_module() -> None:
 
 
 def _install_fake_plugin_manager() -> dict:
+    """Install a minimal ``hermes_cli.plugins`` module that mirrors the
+    real upstream surface so the test would catch the integration gap
+    found in PRs #2/#3/#4. The real ``PluginManager`` exposes
+    ``_hooks: dict[str, list[Callable]]`` and does NOT have a public
+    ``register_hook`` method of its own (that lives on
+    ``PluginContext``).
+    """
     fake_pkg = types.ModuleType("hermes_cli")
     fake_mod = types.ModuleType("hermes_cli.plugins")
-    state: dict = {"registered": []}
 
     class _FakeManager:
-        def register_hook(self, hook_name: str, callback: Any) -> None:
-            state["registered"].append((hook_name, callback))
+        def __init__(self) -> None:
+            self._hooks: dict[str, list[Any]] = {}
 
-    fake_mod.get_plugin_manager = lambda: _FakeManager()  # type: ignore[attr-defined]
+    manager = _FakeManager()
+
+    class _RegisteredView:
+        def __iter__(self):
+            for name, cbs in manager._hooks.items():
+                for cb in cbs:
+                    yield (name, cb)
+
+        def __len__(self):
+            return sum(len(v) for v in manager._hooks.values())
+
+        def __getitem__(self, idx):
+            return list(self)[idx]
+
+    state: dict = {"manager": manager, "registered": _RegisteredView()}
+
+    fake_mod.get_plugin_manager = lambda: manager  # type: ignore[attr-defined]
     sys.modules.setdefault("hermes_cli", fake_pkg)
     sys.modules["hermes_cli.plugins"] = fake_mod
     return state
@@ -264,6 +286,31 @@ def test_register_without_adapter_module_succeeds(monkeypatch):
     assert registry.pre_tool_calls == []
     sys.modules.pop("hermes_cli.plugins", None)
     sys.modules.pop("hermes_cli", None)
+
+
+def test_bridge_installs_on_real_plugin_manager_surface(_reset_module_state):
+    """Regression guard for the integration gap fixed in
+    fix/smd-hooks-plugin-manager-integration.
+
+    The real upstream ``PluginManager`` exposes ``_hooks`` only; the
+    public ``register_hook`` method lives on ``PluginContext``. Earlier
+    versions of this bridge called ``manager.register_hook(...)``,
+    which raised ``AttributeError`` at production boot and was masked
+    in tests by fakes that exposed the wrong surface.
+
+    This test asserts the bridge installs against a manager that ONLY
+    has ``_hooks`` (no ``register_hook``)."""
+    from smd.hooks import trust_ceiling
+
+    manager = _reset_module_state["manager"]
+    assert not hasattr(manager, "register_hook"), (
+        "fake manager must mirror the real upstream surface "
+        "(no register_hook method) for this regression guard to hold"
+    )
+
+    trust_ceiling.register_smd_adapter(_FakeRegistry(), customer_id="acme")
+    assert "pre_tool_call" in manager._hooks
+    assert len(manager._hooks["pre_tool_call"]) == 1
 
 
 def test_second_register_swaps_registry_without_double_bridge(_reset_module_state):
