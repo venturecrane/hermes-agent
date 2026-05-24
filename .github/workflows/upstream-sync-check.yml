@@ -1,0 +1,90 @@
+name: Upstream sync check
+
+on:
+  schedule:
+    # First of the month, 10:07 UTC. Off the :00 mark to avoid GH
+    # Actions cron contention.
+    - cron: '7 10 1 * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  upstream-sync-check:
+    name: Flag fork if >90 days behind upstream main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream main --depth=1
+
+      - name: Compare fork to upstream
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          upstream_sha="$(git rev-parse upstream/main)"
+          upstream_iso="$(git -c log.showSignature=false log -1 --format=%cI "$upstream_sha")"
+          upstream_epoch="$(date -d "$upstream_iso" +%s)"
+          fork_head_iso="$(git -c log.showSignature=false log -1 --format=%cI HEAD)"
+          fork_head_epoch="$(date -d "$fork_head_iso" +%s)"
+
+          # Find the most recent commit on the fork's main that is also
+          # reachable from upstream/main; that approximates "last rebase
+          # point." If none found, base_epoch = 0 (treat as very old).
+          merge_base="$(git merge-base HEAD upstream/main || true)"
+          if [ -n "$merge_base" ]; then
+            base_iso="$(git -c log.showSignature=false log -1 --format=%cI "$merge_base")"
+            base_epoch="$(date -d "$base_iso" +%s)"
+          else
+            base_epoch=0
+          fi
+
+          now_epoch="$(date +%s)"
+          # Days between upstream HEAD's commit date and the fork's last
+          # shared commit with upstream.
+          drift_days=$(( (upstream_epoch - base_epoch) / 86400 ))
+          echo "drift_days=$drift_days" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          echo "Fork last shared upstream commit: $merge_base ($base_iso)"
+          echo "Upstream main HEAD:               $upstream_sha ($upstream_iso)"
+          echo "Drift (days):                     $drift_days"
+
+      - name: Open or update sync-needed issue
+        if: ${{ fromJSON(steps.compare.outputs.drift_days) > 90 }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRIFT_DAYS: ${{ steps.compare.outputs.drift_days }}
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          title="Upstream sync needed: fork is ${DRIFT_DAYS} days behind upstream main"
+          body="The scheduled upstream-sync check ran and observed:
+
+          - Fork last shared upstream commit drift: ${DRIFT_DAYS} days
+          - Current upstream main HEAD: \`${UPSTREAM_SHA}\`
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Per ADR 0015, the fork is rebased on a quarterly cadence and
+          immediately on any upstream security patch. Open a rebase PR
+          referencing this issue."
+
+          # Reuse an existing open sync issue if one exists, otherwise
+          # create one.
+          existing="$(gh issue list --state open --search 'in:title \"Upstream sync needed\"' --json number --jq '.[0].number' || true)"
+          if [ -n "${existing:-}" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label upstream-sync || \
+              gh issue create --title "$title" --body "$body"
+          fi
